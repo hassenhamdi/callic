@@ -3,7 +3,7 @@ set -euo pipefail
 # Fast pre-check + honest smoke bpsp. Keeps every iteration <30s locally; full runs live in Colab.
 # Outputs METRIC name=value lines parsed by run_experiment.
 cd "$(dirname "$0")/.."
-export PYTHONPATH=.:$PYTHONPATH
+export PYTHONPATH=.:${PYTHONPATH:-}
 /usr/bin/python3 -m py_compile callic/*.py tools/*.py tests/*.py 2>&1 | head -n 20
 if [ -f tools/eval_smoke.py ]; then
   /usr/bin/python3 tools/eval_smoke.py
