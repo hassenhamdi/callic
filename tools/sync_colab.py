@@ -28,6 +28,7 @@ MIRROR_FILES = [
     "callic/rpft.py",
     "callic/coder.py",
     "tools/train.py",
+    "tools/bench.py",
     "tools/eval.py",
 ]
 
@@ -89,6 +90,23 @@ GPU_CELLS = [
     ("100k run (resumable, Drive-synced)",
      "import subprocess\n"
      "print(subprocess.run('cd /tmp/callic_pkg && PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True nohup python3 train_full.py --data /tmp/div2k/DIV2K_valid_HR --steps 100000 --bs 32 --lr 5e-4 --schedule cosine --log-every 500 --keep-every 10000 --keep-last 3 --resume --out /tmp/div2k/run100k/mgcf.pt --drive-dir /content/drive/MyDrive/callic/run_100k --drive-every 2000 > /tmp/div2k/run100k.log 2>&1 & echo launched', shell=True, capture_output=True, text=True).stdout)\n"),
+    ("Optimizers: official Muon-family installs (session-scoped)",
+     "import subprocess, sys\n"
+     "print(subprocess.run([sys.executable, '-m', 'pip', '-q', 'install',\n"
+     "  'git+https://github.com/KellerJordan/Muon',\n"
+     "  'git+https://github.com/zichongli5/NorMuon.git'], capture_output=True, text=True).stdout[-200:])\n"
+     "print(subprocess.run(['git', 'clone', '-q', 'https://github.com/tilde-research/aurora-release.git',\n"
+     "  'thirdparty/aurora-release'], capture_output=True, text=True).stderr[-200:] or 'aurora cloned')\n"
+     "import sys as _s\n"
+     "_s.path.insert(0, 'thirdparty/aurora-release/src')\n"
+     "from muon import SingleDeviceMuonWithAuxAdam\n"
+     "from normuon import SingleDeviceNorMuonWithAuxAdam\n"
+     "from aurora import aurora\n"
+     "print('muon + normuon + aurora OK')\n"),
+    ("100k run, NorMuon recipe (shootout winner: held-out 3.44 vs 5.17/6.07)",
+     "import subprocess\n"
+     "print(subprocess.run('nohup python tools/train.py --data data --steps 100000 --bs 32 --lr 5e-4 --opt normuon --muon-lr 0.02 --warmup 2000 --schedule cosine --log-every 500 --keep-every 10000 --keep-last 3 --resume --out checkpoints/mgcf.pt --drive-dir /content/drive/MyDrive/callic/run_100k --drive-every 2000 > train.log 2>&1 & echo launched', shell=True, capture_output=True, text=True).stdout)\n"
+     "print('tip: resume an Adam ckpt under --opt normuon keeps weights+best, restarts optimizer state (verified)')\n"),
     ("Setup (GPU check + install)", "import torch, sys\nprint(torch.__version__, torch.cuda.is_available())\n!nvidia-smi"),
     ("Pretrain MGCF (DIV2K+Flickr2K, 2M steps, bs32, lr5e-4)",
      "PYTHONPATH=/content/callic-gpu-colab python tools/train.py --data /content/data --steps 2000000 --bs 32 --lr 5e-4 --out /content/mgcf.pt"),
