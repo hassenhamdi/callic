@@ -8,8 +8,12 @@
 
 Content-adaptive learned lossless image compression: MGCF pretraining + RPFT per-image adaptation, reproduced from scratch in PyTorch to match the paper's reported values.
 
-Repo copy on Drive: https://drive.google.com/drive/folders/1rjJWK88H6OuasgYEQf_ujbNshKtZ7lMO?usp=sharing
-(all notebooks fetch it automatically via `gdown` when run outside a repo checkout).
+Repo: https://github.com/hassenhamdi/callic — the single source for code, data scripts,
+notebooks, and weights. Nothing is fetched from anywhere else.
+```bash
+git clone https://github.com/hassenhamdi/callic.git && cd callic
+pip install -r requirements.txt
+```
 
 ## Quickstart (5 min)
 
@@ -66,11 +70,11 @@ CALLIC: 2.54 / 1.74 / 2.74 / 2.46 / 2.30.
 
 ## Checkpoints
 
-Trained weights are not committed (see `.gitignore`). Latest run artifacts:
-
-- Drive file (weights/archive): https://drive.google.com/file/d/1rvVllv3Numgt_RyfBssTcJhZcmavOm6q/view?usp=sharing
-- The quickstart notebook (cell 3b) fetches it automatically via `gdown` (zip → `drive_pull/`, single `.pt` → `checkpoints/`).
-- Local copies (if present): `checkpoints/mgcf_74k.pt` (latest, step 74000), `checkpoints/mgcf_best_60500.pt` (best train loss 2.5455).
+Trained weights live as GitHub release assets (not in git, not on Drive):
+https://github.com/hassenhamdi/callic/releases/tag/v0.1
+- `mgcf_74k.pt` (latest, step 74000), `mgcf_best_60500.pt` (best train loss 2.5455).
+- The notebooks fetch them automatically with plain `urllib` (no `gdown`, no auth).
+- Local copies (if present): `checkpoints/`.
 
 Resume any run with the same command + `--resume` (exact step, optimizer/scheduler/best-state intact), e.g.:
 ```bash
