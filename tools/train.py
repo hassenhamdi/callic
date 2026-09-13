@@ -477,8 +477,9 @@ def main():
             sched.step()
         if step % args.log_every == 0:
             dt = time.time() - t0
-            rate = (step + 1) * args.bs / max(dt, 1e-6)
-            eta = (args.steps - step - 1) * (dt / max(step, 1)) / 3600 if step else -1
+            done = step - start_step + 1
+            rate = done * args.bs / max(dt, 1e-6)
+            eta = (args.steps - step - 1) * (dt / max(done, 1)) / 3600 if step else -1
             print(f"step={step} loss_bpsp={loss.item():.4f} "
                   f"{rate:.0f} patches/s eta={eta:.1f}h elapsed={dt:.0f}s", flush=True)
             if val_data is not None:
