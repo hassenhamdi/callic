@@ -110,7 +110,21 @@ def main():
     ap.add_argument("--fused-loss", dest="fused_loss", action="store_true", default=True,
                     help="compile model+NLL as one graph (bench winner: 399 vs 322 patches/s)")
     ap.add_argument("--no-fused-loss", dest="fused_loss", action="store_false")
+    ap.add_argument("--val-data", default="",
+                    help="held-out image dir for val bpsp logging (e.g. data/DIV2K_valid_HR "
+                         "when --data is the train split). Logged every --log-every steps. "
+                         "All paths resolve against the repo root unless absolute.")
     args = ap.parse_args()
+
+    # Anchor relative paths at the repo root (script lives in <root>/tools/),
+    # so the script works from any cwd: `python /path/to/tools/train.py --data data`.
+    REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if not os.path.isabs(args.data):
+        args.data = os.path.join(REPO, args.data)
+    if not os.path.isabs(args.out):
+        args.out = os.path.join(REPO, args.out)
+    if args.val_data and not os.path.isabs(args.val_data):
+        args.val_data = os.path.join(REPO, args.val_data)
 
     if args.smoke or not os.path.isdir(args.data):
         print("train: smoke mode (synthetic checker, honest NLL descent proof)")
@@ -147,6 +161,42 @@ def main():
     data = torch.stack(allp)
     del allp
     print(f"train: {len(data)} patches")
+
+    # Held-out val pool (disjoint dir, capped; no grad, fp32, chunked).
+    val_data = None
+    if args.val_data:
+        import glob as _vg
+
+        vfiles = sorted(_vg.glob(os.path.join(args.val_data, "**", "*.png"), recursive=True))
+        vfiles += sorted(_vg.glob(os.path.join(args.val_data, "**", "*.jpg"), recursive=True))
+        assert vfiles, f"no images under {args.val_data}"
+        vall = []
+        for f in vfiles:
+            im = Image.open(f).convert("RGB")
+            w, h = im.size
+            a = np.array(im, dtype=np.uint8)
+            for y in range(0, h - P + 1, P):
+                for x in range(0, w - P + 1, P):
+                    vall.append(torch.from_numpy(a[y : y + P, x : x + P].transpose(2, 0, 1)))
+                    if len(vall) >= 256:
+                        break
+                if len(vall) >= 256:
+                    break
+            if len(vall) >= 256:
+                break
+        val_data = torch.stack(vall)
+        print(f"train: {len(val_data)} held-out val patches from {args.val_data}")
+
+    def _val_bpsp():
+        _unwrap(m).eval()
+        tot, n = 0.0, 0
+        with torch.no_grad():
+            for i in range(0, len(val_data), 32):
+                eb = val_data[i : i + 32].to(device)
+                tot += float(discretized_mixture_nll(eb, _unwrap(m)(eb.float()).float()).item()) * len(eb)
+                n += len(eb)
+        m.train()
+        return tot / max(1, n)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     use_cuda = device == "cuda"
@@ -355,6 +405,8 @@ def main():
             eta = (args.steps - step - 1) * (dt / max(step, 1)) / 3600 if step else -1
             print(f"step={step} loss_bpsp={loss.item():.4f} "
                   f"{rate:.0f} patches/s eta={eta:.1f}h elapsed={dt:.0f}s")
+            if val_data is not None:
+                print(f"step={step} val_bpsp={_val_bpsp():.4f} (held-out, {len(val_data)} patches)")
             outdir = os.path.dirname(args.out)
             if outdir:
                 os.makedirs(outdir, exist_ok=True)
