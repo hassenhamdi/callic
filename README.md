@@ -6,33 +6,128 @@
 > results yourself before relying on them (correctness gates in `tests/` are the
 > starting point, not a proof).
 
-Content-adaptive learned lossless image compression: MGCF pretraining + RPFT per-image adaptation, reproduced from scratch in PyTorch to match the paper's reported values.
+Content-adaptive learned lossless image compression: pretrain the Masked Gated
+ConvFormer (MGCF), then adapt it per test image with Rate-guided Progressive
+Fine-Tuning (RPFT) over LoRA + Tucker incremental weights. Reproduced from scratch
+in PyTorch to match the paper's reported values.
 
-Repo: https://github.com/hassenhamdi/callic — the single source for code, data scripts,
-notebooks, and weights. Nothing is fetched from anywhere else.
+Repo: https://github.com/hassenhamdi/callic — the single source for code, data
+scripts, notebooks, and weights. Nothing is fetched from anywhere else.
+
+## 5-minute quick setup
+
+Gets you from zero to a verified working tree (CPU is fine for everything below):
+
 ```bash
+# 1. Fetch (2 min on a normal connection — repo is <1MB, no weights in git)
 git clone https://github.com/hassenhamdi/callic.git && cd callic
-pip install -r requirements.txt
+
+# 2. Install (Python 3.10+, PyTorch CPU or CUDA build)
+pip install -r requirements.txt          # torch, pillow, numpy
+
+# 3. Verify correctness gates (~30s CPU)
+bash .auto/checks.sh                     # masks, CCI parity, merge equality, budgets
+# expect: FAITHFUL_OK ... / TEST_OK ... / CHECKS_OK
+
+# 4. Prove the model learns (~1 min CPU)
+python tools/train.py --smoke            # 15 Adam steps on synthetic data
+# expect: train_smoke_final_bpsp=5.6953 params=580964
 ```
 
-## Quickstart (5 min)
+Or open `notebooks/quickstart.ipynb` for the same flow guided (works in Colab:
+it finds the repo, downloads Kodak + DIV2K-valid, runs the gates, trains a demo,
+and evals it).
+
+## 30-minute demo (GPU recommended, CPU works — slower)
+
+Trains a real (small) model on DIV2K-valid and evaluates it on Kodak 24:
 
 ```bash
-git clone <this-repo> && cd <this-repo>
-pip install -r requirements.txt
-bash tools/lightning_setup.sh        # full data (DIV2K + Flickr2K + Kodak)
-# — or open notebooks/quickstart.ipynb for the guided version —
-python tools/train.py --smoke        # sanity: NLL descends on synthetic data
-bash .auto/checks.sh                 # masks, CCI parity, merge equality, budgets
+# data: 100 DIV2K-valid images (449MB) + Kodak 24 (~15MB)
+mkdir -p data && cd data &&
+  curl -L -o v.zip https://data.vision.ee.ethz.ch/cvl/DIV2K/DIV2K_valid_HR.zip &&
+  unzip -q -o v.zip && rm v.zip && cd ..
+# demo run: 200 steps, cosine schedule (~10 min on a T4)
+python tools/train.py --data data/DIV2K_valid_HR --steps 200 --bs 32 \
+  --schedule cosine --log-every 50 --keep-every 0 --out checkpoints/demo.pt
+# evaluate (honest NLL bpsp; random-init ≈ 23, expect ≈ 8-9 after 200 steps)
+python tools/eval.py --ckpt checkpoints/demo.pt --data_root data/eval
 ```
 
-Full paper recipe (GPU):
+## Full training (paper recipe, GPU)
+
+Pretrain MGCF exactly as reported — DIV2K 800 + Flickr2K 2650 → non-overlap
+64×64 patches, Adam/normuon, 2M steps, batch 32, lr 5e-4:
+
 ```bash
-python tools/train.py --data data --steps 2000000 --bs 32 --lr 5e-4 \
-  --schedule cosine --keep-every 50000 --keep-last 3 --resume \
-  --out checkpoints/mgcf_full.pt
-python tools/eval.py --ckpt checkpoints/mgcf_full.pt --data_root data/eval
+bash tools/lightning_setup.sh            # full data: DIV2K + Flickr2K + Kodak
+nohup python tools/train.py --data data --steps 2000000 --bs 32 --lr 5e-4 \
+  --opt normuon --muon-lr 0.02 --warmup 2000 --schedule cosine \
+  --log-every 500 --keep-every 50000 --keep-last 3 \
+  --out checkpoints/mgcf_full.pt > train.log 2>&1 &
+tail -f train.log
 ```
+
+Wall-clock reference (measured): ~44h T4 / ~25h L4-A10G / ~9h A100.
+Gate at ~200k steps: train loss should read ≤ ~4 (else stop and check the data).
+
+Why `--opt normuon`: a 300-step held-out shootout on real DIV2K patches
+(`notebooks/bench_speedups.ipynb`) measured AdamW 6.07 / Muon 5.17 /
+**NorMuon 3.44** / Aurora 5.41 — official implementations only, model untouched.
+Paper-exact AdamW remains the default; pass `--opt` explicitly to deviate.
+
+## Resume training (from any checkpoint)
+
+Checkpoints store weights + step + optimizer/scheduler/scaler + best-state, so any
+run continues exactly — same or different optimizer, locally or on a new machine:
+
+```bash
+# fetch published weights (GitHub release assets, no auth)
+python -c "import urllib.request; urllib.request.urlretrieve(
+  'https://github.com/hassenhamdi/callic/releases/download/v0.1/mgcf_74k.pt',
+  'checkpoints/mgcf_74k.pt')"
+# continue it (example: switch the Adam 74k ckpt to NorMuon)
+nohup python tools/train.py --data data --steps 100000 --bs 32 --lr 5e-4 \
+  --opt normuon --muon-lr 0.02 --warmup 2000 --schedule cosine \
+  --log-every 500 --keep-every 10000 --keep-last 3 \
+  --resume --out checkpoints/mgcf_74k.pt > train.log 2>&1 &
+```
+
+`notebooks/resume_training.ipynb` automates this end-to-end: fetch → verify
+(step/best printed) → relaunch in background → poll progress. Every `tools/train.py`
+run also saves `*_best.pt` on improvement plus numbered keeps (`--keep-every`).
+
+## Benchmarking (beat the defaults with data, not opinions)
+
+`notebooks/bench_speedups.ipynb` + `tools/bench.py` test every speedup claim under
+one timed protocol (identical seed/data, steady-state s/step, **held-out** loss
+from disjoint images — training loss is never compared):
+
+- **System:** AMP, channels-last, `torch.compile` modes, fused model+NLL graph,
+  cudnn.benchmark, matmul precision, batch sweep. Measured (T4): fused-loss wins
+  (399 patches/s); cudnn/matmul neutral; batch flat (bs32 stands).
+- **Optimizers (official code only):** AdamW vs KellerJordan Muon vs NorMuon vs
+  tilde-research Aurora. No reimplemented math; Turbo-Muon excluded (no official
+  PyTorch implementation exists).
+- **TPU:** `device='xla'` supported (bf16, XLA sync); realistic single-chip
+  estimate for this conv workload is 1–2× a T4 — GPU remains the recommendation.
+
+## Evaluation (paper Table 1)
+
+```bash
+python tools/eval.py --ckpt checkpoints/mgcf_full.pt --data_root data/eval        # MGCF rows
+python tools/eval.py --ckpt checkpoints/mgcf_full.pt --data_root data/eval --rpft # CALLIC rows (T=50 + weight bits)
+```
+
+| bpsp | Kodak | RS19 | Histo24 | DIV2K | CLIC.p |
+|---|---|---|---|---|---|
+| MGCF (paper) | 2.77 | 1.94 | 2.88 | 2.49 | 2.33 |
+| CALLIC (paper) | 2.54 | 1.74 | 2.74 | 2.46 | 2.30 |
+
+Metric: total bits / (H·W·3), incremental-weight bits always included in CALLIC
+rows. Cost note: RPFT T=50 ≈ 60 s/image on T4 — use the paper's T=10 fast mode
+for the 190-image RS19 set. RS19/Histo24/CLIC need manual prep (Kodak + DIV2K-val
+download automatically).
 
 ## Layout
 
@@ -45,13 +140,13 @@ python tools/eval.py --ckpt checkpoints/mgcf_full.pt --data_root data/eval
 | `callic/adapt.py` | LoRA (Eq. 6) + Tucker DWConv (Eq. 7) + STE quant + MDL loss (Eq. 9) + `CALLICModel` |
 | `callic/rpft.py` | Rate-guided Progressive Fine-Tuning schedule (Eq. 8) |
 | `callic/coder.py` | Entropy bookkeeping (weight bits + pixel bits → bpsp) |
-| `tools/train.py` | Pretraining: AMP, channels-last, `torch.compile`, best+numbered ckpts, `--resume`, Drive sync |
-| `tools/bench.py` | Speedup benchmark harness: system toggles, batch sweep, Muon-lite/NorMuon-lite/Turbo-lite shootout |
-| `tools/eval.py` | Eval on Kodak / RS19 / Histo24 / DIV2K-val / CLIC.p |
+| `tools/train.py` | Pretraining: AMP/CL/compile/fused-loss, `--opt`, warmup, best+numbered ckpts, `--resume` |
+| `tools/bench.py` | Speedup harness (official optimizers, held-out eval, XLA support) |
+| `tools/eval.py` | Eval on Kodak / RS19 / Histo24 / DIV2K-val / CLIC.p (+RPFT) |
 | `tools/lightning_setup.sh` | One-shot env + full paper data download |
-| `notebooks/quickstart.ipynb` | Self-contained setup → data → train → eval |
-| `notebooks/resume_training.ipynb` | Quick setup to continue training from any checkpoint (fetch → verify → relaunch → poll) |
-| `notebooks/bench_speedups.ipynb` | Test every speedup (system/optimizer/schedule), keep what wins |
+| `notebooks/quickstart.ipynb` | Guided 5-min setup → data → gates → demo train → eval |
+| `notebooks/resume_training.ipynb` | Fetch any ckpt → verify → relaunch → poll |
+| `notebooks/bench_speedups.ipynb` | System/optimizer/schedule shootout + TPU notes |
 | `tests/` | Mask causality, CCI parity, LoRA/Tucker merge equality, STE, RPFT schedule, round-trip |
 | `docs/plans/` | Run plans (incl. Lightning 80h budget) |
 
@@ -63,22 +158,20 @@ python tools/eval.py --ckpt checkpoints/mgcf_full.pt --data_root data/eval
 - Metric: bpsp = total bits / (H·W·3), weight bits always included for CALLIC rows.
 - Anti-cheat: train on train splits only, no test-tuned hyperparams, no hard-coded tables, entropy bpsp reported separately from coder bits.
 
-## Paper targets (Table 1, bpsp)
-
-MGCF: Kodak 2.77 / RS19 1.94 / Histo24 2.88 / DIV2K 2.49 / CLIC.p 2.33 —
-CALLIC: 2.54 / 1.74 / 2.74 / 2.46 / 2.30.
-
 ## Checkpoints
 
-Trained weights live as GitHub release assets (not in git, not on Drive):
+Trained weights live as GitHub release assets (not in git):
 https://github.com/hassenhamdi/callic/releases/tag/v0.1
 - `mgcf_74k.pt` (latest, step 74000), `mgcf_best_60500.pt` (best train loss 2.5455).
-- The notebooks fetch them automatically with plain `urllib` (no `gdown`, no auth).
-- Local copies (if present): `checkpoints/`.
+- Notebooks fetch them with plain `urllib` (no auth); local copies go in `checkpoints/`.
 
-Resume any run with the same command + `--resume` (exact step, optimizer/scheduler/best-state intact), e.g.:
-```bash
-nohup python tools/train.py --data data --steps 100000 --bs 32 --lr 5e-4 \
-  --schedule cosine --log-every 500 --keep-every 10000 --keep-last 3 \
-  --resume --out checkpoints/mgcf_74k.pt > train.log 2>&1 &
+## Citation
+
+```bibtex
+@article{li2024callic,
+  title   = {CALLIC: Content Adaptive Learning for Lossless Image Compression},
+  author  = {Li, Daxin and Bai, Yuanchao and Wang, Kai and Jiang, Junjun and Liu, Xianming and Gao, Wen},
+  journal = {arXiv preprint arXiv:2412.17464},
+  year    = {2024}
+}
 ```
