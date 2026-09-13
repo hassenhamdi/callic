@@ -93,6 +93,9 @@ def main():
                          "latest ckpt + numbered keeps + status there every "
                          "--drive-every steps so artifacts survive session death")
     ap.add_argument("--drive-every", type=int, default=2000)
+    ap.add_argument("--cache-patches", dest="cache_patches", action="store_true", default=False,
+                    help="cache all non-overlap patches in RAM (fastest, but peaks ~2x pool "
+                         "size — OOMs on small VMs for DIV2K-train; default streams crops)")
     ap.add_argument("--keep-best", dest="keep_best", action="store_true", default=True,
                     help="also keep the best-loss ckpt (default on)")
     ap.add_argument("--no-keep-best", dest="keep_best", action="store_false")
@@ -147,20 +150,25 @@ def main():
     img_files = sorted(glob.glob(os.path.join(args.data, "**", "*.png"), recursive=True))
     img_files += sorted(glob.glob(os.path.join(args.data, "**", "*.jpg"), recursive=True))
     assert img_files, f"no images under {args.data}"
-    print(f"train: caching non-overlap {P}x{P} patches from {len(img_files)} images...")
-    allp = []
-    for fi, f in enumerate(img_files):
-        im = Image.open(f).convert("RGB")
-        w, h = im.size
-        a = np.array(im, dtype=np.uint8)
-        for y in range(0, h - P + 1, P):
-            for x in range(0, w - P + 1, P):
-                allp.append(torch.from_numpy(a[y : y + P, x : x + P].transpose(2, 0, 1)))
-        if len(allp) >= 612806:
-            break
-    data = torch.stack(allp)
-    del allp
-    print(f"train: {len(data)} patches")
+    stream = not args.cache_patches
+    if args.cache_patches:
+        print(f"train: caching non-overlap {P}x{P} patches from {len(img_files)} images...")
+        allp = []
+        for fi, f in enumerate(img_files):
+            im = Image.open(f).convert("RGB")
+            w, h = im.size
+            a = np.array(im, dtype=np.uint8)
+            for y in range(0, h - P + 1, P):
+                for x in range(0, w - P + 1, P):
+                    allp.append(torch.from_numpy(a[y : y + P, x : x + P].transpose(2, 0, 1)))
+            if len(allp) >= 612806:
+                break
+        data = torch.stack(allp)
+        del allp
+        print(f"train: {len(data)} patches (peak RAM ~2x this while stacking)")
+    else:
+        print(f"train: streaming random {P}x{P} crops from {len(img_files)} images (low RAM)")
+        data = None
 
     # Held-out val pool (disjoint dir, capped; no grad, fp32, chunked).
     val_data = None
@@ -374,16 +382,54 @@ def main():
         except Exception as e:
             print(f"train: resume failed ({str(e)[:100]}), from scratch")
     scaler = torch.amp.GradScaler("cuda", enabled=(args.amp and use_cuda))
-    if use_cuda:
+    loader, loader_it = None, None
+    if stream:
+        from torch.utils.data import DataLoader, Dataset
+
+        _files, _P = img_files, P
+
+        class _CropDS(Dataset):
+            def __len__(self):
+                return max(1, args.steps * args.bs)
+
+            def __getitem__(self, i):
+                import random as _rnd
+
+                f = _files[_rnd.randrange(len(_files))]
+                im = Image.open(f).convert("RGB")
+                w, h = im.size
+                x = _rnd.randrange(0, max(1, w - _P))
+                y = _rnd.randrange(0, max(1, h - _P))
+                a = np.array(im.crop((x, y, x + _P, y + _P)), dtype=np.uint8)
+                return torch.from_numpy(a.transpose(2, 0, 1))
+
+        loader = DataLoader(_CropDS(), batch_size=args.bs, shuffle=False,
+                            num_workers=0, pin_memory=use_cuda, drop_last=True)
+        # NOTE: num_workers=0 deliberately — worker processes break under
+        # Python 3.14 forkserver/CUDA, and PIL-decoding 32 crops (~ms) is
+        # negligible next to a ~100ms GPU step.
+        loader_it = iter(loader)
+    elif use_cuda:
         try:
             data = data.pin_memory()
         except Exception:
             pass
     m.train()
     t0 = time.time()
-    for step in range(start_step, args.steps):
+
+    def _next_batch():
+        nonlocal loader_it
+        if stream:
+            try:
+                return loader_it.__next__()
+            except StopIteration:
+                loader_it = iter(loader)
+                return loader_it.__next__()
         sel = torch.randint(0, len(data), (args.bs,))
-        b = data[sel].to(device, non_blocking=True)
+        return data[sel]
+
+    for step in range(start_step, args.steps):
+        b = _next_batch().to(device, non_blocking=True)
         if use_cuda and args.cl:
             b = b.to(memory_format=torch.channels_last)
         opt.zero_grad(set_to_none=True)
