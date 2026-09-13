@@ -71,6 +71,16 @@ tail -f train.log
 Wall-clock reference (measured): ~44h T4 / ~25h L4-A10G / ~9h A100.
 Gate at ~200k steps: train loss should read ≤ ~4 (else stop and check the data).
 
+Shorter validation run first (fresh NorMuon weights, DIV2K-train, ~30 min T4 —
+beats Adam's ~7 @ step 50 on the same data if the recipe holds):
+
+```bash
+nohup python tools/train.py --data data/DIV2K_train_HR --steps 10000 --bs 32 --lr 5e-4 \
+  --opt normuon --muon-lr 0.02 --warmup 500 --schedule cosine \
+  --log-every 100 --keep-every 5000 --keep-last 2 \
+  --out checkpoints/mgcf_normuon_10k.pt > train_10k.log 2>&1 &
+```
+
 Why `--opt normuon`: a 300-step held-out shootout on real DIV2K patches
 (`notebooks/bench_speedups.ipynb`) measured AdamW 6.07 / Muon 5.17 /
 **NorMuon 3.44** / Aurora 5.41 — official implementations only, model untouched.
@@ -103,9 +113,11 @@ run also saves `*_best.pt` on improvement plus numbered keeps (`--keep-every`).
 one timed protocol (identical seed/data, steady-state s/step, **held-out** loss
 from disjoint images — training loss is never compared):
 
-- **System:** AMP, channels-last, `torch.compile` modes, fused model+NLL graph,
-  cudnn.benchmark, matmul precision, batch sweep. Measured (T4): fused-loss wins
-  (399 patches/s); cudnn/matmul neutral; batch flat (bs32 stands).
+- **System:** AMP, channels-last, `torch.compile` modes, fused model+NLL graph
+  (default on, bench winner), cudnn.benchmark, matmul precision, batch sweep.
+  Measured (T4): fused-loss wins (399 patches/s); cudnn/matmul neutral; batch
+  flat (bs32 stands). TPU present via `device='xla'` but single-chip estimate
+  is only 1–2× a T4 for this conv workload — GPU stays recommended.
 - **Optimizers (official code only):** AdamW vs KellerJordan Muon vs NorMuon vs
   tilde-research Aurora. No reimplemented math; Turbo-Muon excluded (no official
   PyTorch implementation exists).
