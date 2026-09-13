@@ -68,8 +68,14 @@ nohup python tools/train.py --data data --steps 2000000 --bs 32 --lr 5e-4 \
 tail -f train.log
 ```
 
-Wall-clock reference (measured): ~44h T4 / ~25h L4-A10G / ~9h A100.
-Gate at ~200k steps: train loss should read ≤ ~4 (else stop and check the data).
+Train/test discipline (exact, reproducible): `--val-data <dir>` validates on a
+separate directory, else `--val-frac <f>` holds out every `round(1/f)`-th file
+(strided, deterministic) *before* caching/streaming, so test images never enter
+training — `val_bpsp` on up to 1024 held-out patches logs next to train loss.
+For DIV2K-train (800 imgs): `--val-frac 0.1` → **720 train / 80 test** (paper's
+pooled total was 612806 patches incl. Flickr2K; exact per-run counts print at
+startup). This is separate from correctness validation (`tests/` + `--smoke`),
+which checks the code rather than the fit.
 
 Shorter validation run first (fresh NorMuon weights, DIV2K-train, ~30 min T4 —
 beats Adam's ~7 @ step 50 on the same data if the recipe holds):

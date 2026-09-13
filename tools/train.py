@@ -117,6 +117,10 @@ def main():
                     help="held-out image dir for val bpsp logging (e.g. data/DIV2K_valid_HR "
                          "when --data is the train split). Logged every --log-every steps. "
                          "All paths resolve against the repo root unless absolute.")
+    ap.add_argument("--val-frac", type=float, default=0.0,
+                    help="if no --val-data: hold out this fraction of --data files as the "
+                         "test split (deterministic strided selection, e.g. 0.1 = every "
+                         "10th file). Gives exact, reproducible train/test counts.")
     args = ap.parse_args()
 
     # Anchor relative paths at the repo root (script lives in <root>/tools/),
@@ -150,6 +154,23 @@ def main():
     img_files = sorted(glob.glob(os.path.join(args.data, "**", "*.png"), recursive=True))
     img_files += sorted(glob.glob(os.path.join(args.data, "**", "*.jpg"), recursive=True))
     assert img_files, f"no images under {args.data}"
+    # Rational test proportion: explicit --val-data dir wins; else deterministic
+    # strided split of --data via --val-frac (every kth file held out).
+    # Done BEFORE caching/streaming so test images never enter training.
+    val_files = []
+    if args.val_data:
+        import glob as _vg
+
+        val_files = sorted(_vg.glob(os.path.join(args.val_data, "**", "*.png"), recursive=True))
+        val_files += sorted(_vg.glob(os.path.join(args.val_data, "**", "*.jpg"), recursive=True))
+        assert val_files, f"no images under {args.val_data}"
+    elif args.val_frac > 0:
+        assert 0 < args.val_frac < 1, "--val-frac must be in (0,1)"
+        every = max(1, round(1 / args.val_frac))
+        val_files = [f for i, f in enumerate(img_files) if i % every == 0]
+        img_files = [f for i, f in enumerate(img_files) if i % every != 0]
+        print(f"train: split {len(img_files)} train / {len(val_files)} test files "
+              f"(val-frac={args.val_frac}, every {every}th file held out)")
     stream = not args.cache_patches
     if args.cache_patches:
         print(f"train: caching non-overlap {P}x{P} patches from {len(img_files)} images...")
@@ -170,30 +191,27 @@ def main():
         print(f"train: streaming random {P}x{P} crops from {len(img_files)} images (low RAM)")
         data = None
 
-    # Held-out val pool (disjoint dir, capped; no grad, fp32, chunked).
+    # Held-out val pool from the split-off images (capped at 1024 patches;
+    # no grad, fp32, chunked at eval). Separate from correctness validation
+    # (tests/ gates + --smoke), which checks the code rather than the fit.
     val_data = None
-    if args.val_data:
-        import glob as _vg
-
-        vfiles = sorted(_vg.glob(os.path.join(args.val_data, "**", "*.png"), recursive=True))
-        vfiles += sorted(_vg.glob(os.path.join(args.val_data, "**", "*.jpg"), recursive=True))
-        assert vfiles, f"no images under {args.val_data}"
+    if val_files:
         vall = []
-        for f in vfiles:
+        for f in val_files:
             im = Image.open(f).convert("RGB")
             w, h = im.size
             a = np.array(im, dtype=np.uint8)
             for y in range(0, h - P + 1, P):
                 for x in range(0, w - P + 1, P):
                     vall.append(torch.from_numpy(a[y : y + P, x : x + P].transpose(2, 0, 1)))
-                    if len(vall) >= 256:
+                    if len(vall) >= 1024:
                         break
-                if len(vall) >= 256:
+                if len(vall) >= 1024:
                     break
-            if len(vall) >= 256:
+            if len(vall) >= 1024:
                 break
         val_data = torch.stack(vall)
-        print(f"train: {len(val_data)} held-out val patches from {args.val_data}")
+        print(f"train: {len(val_data)} held-out val patches from {len(val_files)} test files")
 
     def _val_bpsp():
         _unwrap(m).eval()
