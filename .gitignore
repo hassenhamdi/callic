@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+.ruff_cache/
+data/
+checkpoints/
+thirdparty/
+*.pt
+*.zip
+drive_pull/
+.ipynb_checkpoints/
+.colab/

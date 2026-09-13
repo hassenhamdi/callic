@@ -1,0 +1,74 @@
+# CALLIC — faithful reproduction (arXiv:2412.17464v1)
+
+Content-adaptive learned lossless image compression: MGCF pretraining + RPFT per-image adaptation, reproduced from scratch in PyTorch to match the paper's reported values.
+
+Repo copy on Drive: https://drive.google.com/drive/folders/1rjJWK88H6OuasgYEQf_ujbNshKtZ7lMO?usp=sharing
+(all notebooks fetch it automatically via `gdown` when run outside a repo checkout).
+
+## Quickstart (5 min)
+
+```bash
+git clone <this-repo> && cd <this-repo>
+pip install -r requirements.txt
+bash tools/lightning_setup.sh        # full data (DIV2K + Flickr2K + Kodak)
+# — or open notebooks/quickstart.ipynb for the guided version —
+python tools/train.py --smoke        # sanity: NLL descends on synthetic data
+bash .auto/checks.sh                 # masks, CCI parity, merge equality, budgets
+```
+
+Full paper recipe (GPU):
+```bash
+python tools/train.py --data data --steps 2000000 --bs 32 --lr 5e-4 \
+  --schedule cosine --keep-every 50000 --keep-last 3 --resume \
+  --out checkpoints/mgcf_full.pt
+python tools/eval.py --ckpt checkpoints/mgcf_full.pt --data_root data/eval
+```
+
+## Layout
+
+| Path | Contents |
+|---|---|
+| `callic/mcg.py` | Masked Convolutional Gating (Eq. 5, Fig. 1a) |
+| `callic/mgcf.py` | Masked Gated ConvFormer (Fig. 1b): Type-B embed + 3 blocks + mixture head |
+| `callic/mixture.py` | Discrete logistic mixture NLL, K=10 (PixelCNN++ style) |
+| `callic/cci.py` | Cache-then-Crop grouped AR inference, 3P−2 steps (Fig. 1c) |
+| `callic/adapt.py` | LoRA (Eq. 6) + Tucker DWConv (Eq. 7) + STE quant + MDL loss (Eq. 9) + `CALLICModel` |
+| `callic/rpft.py` | Rate-guided Progressive Fine-Tuning schedule (Eq. 8) |
+| `callic/coder.py` | Entropy bookkeeping (weight bits + pixel bits → bpsp) |
+| `tools/train.py` | Pretraining: AMP, channels-last, `torch.compile`, best+numbered ckpts, `--resume`, Drive sync |
+| `tools/bench.py` | Speedup benchmark harness: system toggles, batch sweep, Muon-lite/NorMuon-lite/Turbo-lite shootout |
+| `tools/eval.py` | Eval on Kodak / RS19 / Histo24 / DIV2K-val / CLIC.p |
+| `tools/lightning_setup.sh` | One-shot env + full paper data download |
+| `notebooks/quickstart.ipynb` | Self-contained setup → data → train → eval |
+| `notebooks/resume_training.ipynb` | Quick setup to continue training from any checkpoint (fetch → verify → relaunch → poll) |
+| `notebooks/bench_speedups.ipynb` | Test every speedup (system/optimizer/schedule), keep what wins |
+| `tests/` | Mask causality, CCI parity, LoRA/Tucker merge equality, STE, RPFT schedule, round-trip |
+| `docs/plans/` | Run plans (incl. Lightning 80h budget) |
+
+## Fidelity notes (read before modifying)
+
+- MGCF: dim 128, depth 3, k 7 (Table 3) → 580964 params (~1% over the reported 575K; MLP expansion/K are unstated in the paper and asserted 570–590K).
+- Adaptors: WA/WV r=8, Wup r=4, DWConv Tucker (8,4,4) → exact 23592 mergeable (~25K).
+- RPFT defaults: b=0.2, d=0.1, e=1, T=50, lr=1e-2; quant w=0.05; prior s=0.05.
+- Metric: bpsp = total bits / (H·W·3), weight bits always included for CALLIC rows.
+- Anti-cheat: train on train splits only, no test-tuned hyperparams, no hard-coded tables, entropy bpsp reported separately from coder bits.
+
+## Paper targets (Table 1, bpsp)
+
+MGCF: Kodak 2.77 / RS19 1.94 / Histo24 2.88 / DIV2K 2.49 / CLIC.p 2.33 —
+CALLIC: 2.54 / 1.74 / 2.74 / 2.46 / 2.30.
+
+## Checkpoints
+
+Trained weights are not committed (see `.gitignore`). Latest run artifacts:
+
+- Drive file (weights/archive): https://drive.google.com/file/d/1rvVllv3Numgt_RyfBssTcJhZcmavOm6q/view?usp=sharing
+- The quickstart notebook (cell 3b) fetches it automatically via `gdown` (zip → `drive_pull/`, single `.pt` → `checkpoints/`).
+- Local copies (if present): `checkpoints/mgcf_74k.pt` (latest, step 74000), `checkpoints/mgcf_best_60500.pt` (best train loss 2.5455).
+
+Resume any run with the same command + `--resume` (exact step, optimizer/scheduler/best-state intact), e.g.:
+```bash
+nohup python tools/train.py --data data --steps 100000 --bs 32 --lr 5e-4 \
+  --schedule cosine --log-every 500 --keep-every 10000 --keep-last 3 \
+  --resume --out checkpoints/mgcf_74k.pt > train.log 2>&1 &
+```

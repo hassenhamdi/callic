@@ -2,6 +2,8 @@ import time
 
 import torch
 
+from callic.adapt import count_mergeable
+from callic.cci import cci_parity_check
 from callic.mgcf import MGCF
 from callic.mixture import discretized_mixture_nll
 
@@ -29,8 +31,12 @@ for _ in range(15):
 m.eval()
 with torch.no_grad():
     bpsp1 = discretized_mixture_nll(batch, m(batch.float())).item()
-print(f"SMOKE params={p} before={bpsp0:.4f} after_tiny={bpsp1:.4f}")
+    perr = cci_parity_check(m, batch[:1])
+mp = count_mergeable(m)
+print(
+    f"SMOKE params={p} before={bpsp0:.4f} after_tiny={bpsp1:.4f} cci_err={perr:.2e} mergeable={mp}"
+)
 print(f"METRIC kodak_bpsp={bpsp1:.4f}")
 print(f"METRIC params={p}")
-print("METRIC mergeable_params=0")
+print(f"METRIC mergeable_params={mp}")
 print(f"METRIC enc_time_s={time.time() - t0:.3f}")

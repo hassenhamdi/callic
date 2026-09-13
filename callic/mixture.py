@@ -1,6 +1,7 @@
 """CALLIC mixture — discrete logistic mixture NLL (PixelCNN++ style, K mixtures).
 Head channels = K*10: per mixture [pi(1)+mu(3)+scale(3)+coeff(3)].
 Honest entropy, no test tuning."""
+
 import torch
 import torch.nn.functional as F
 
@@ -40,6 +41,8 @@ def discretized_mixture_nll(x, logits, K=10):
     prob = prob.clamp(min=1e-9)
     nll = -torch.log(prob)  # nats per subpixel per mixture
     # mix over K (log-sum-exp with pi)
-    mix = torch.logsumexp(torch.log(pi.unsqueeze(-1).clamp(min=1e-12)) + (-nll), dim=-2)  # [B,H,W,3]
+    mix = torch.logsumexp(
+        torch.log(pi.unsqueeze(-1).clamp(min=1e-12)) + (-nll), dim=-2
+    )  # [B,H,W,3]
     bits = -mix / 0.69314718056
     return bits.mean()

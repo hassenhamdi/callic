@@ -1,0 +1,6 @@
+torch>=2.2
+pillow
+numpy
+# full-data setup only:
+# datasets
+# huggingface_hub
