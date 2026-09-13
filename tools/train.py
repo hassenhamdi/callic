@@ -124,14 +124,22 @@ def main():
     args = ap.parse_args()
 
     # Anchor relative paths at the repo root (script lives in <root>/tools/),
-    # so the script works from any cwd: `python /path/to/tools/train.py --data data`.
+    # so the script works from any cwd — but a path that already resolves
+    # from the cwd wins (never break explicit user paths).
     REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    if not os.path.isabs(args.data):
-        args.data = os.path.join(REPO, args.data)
-    if not os.path.isabs(args.out):
-        args.out = os.path.join(REPO, args.out)
-    if args.val_data and not os.path.isabs(args.val_data):
-        args.val_data = os.path.join(REPO, args.val_data)
+
+    def _resolve(p):
+        if os.path.isabs(p) or os.path.exists(p):
+            return p
+        base = os.path.dirname(p)
+        if base and os.path.exists(base):
+            return p
+        return os.path.join(REPO, p)
+
+    args.data = _resolve(args.data)
+    args.out = _resolve(args.out)
+    if args.val_data:
+        args.val_data = _resolve(args.val_data)
 
     if args.smoke or not os.path.isdir(args.data):
         print("train: smoke mode (synthetic checker, honest NLL descent proof)")
@@ -390,15 +398,19 @@ def main():
 
     start_step = 0
     best_loss, best_step = [None], [None]  # mutable closure for _sync_drive
-    if args.resume and args.out and os.path.isfile(args.out):
-        try:
-            _s, _bl, _bs = _load_ckpt(args.out)
-            start_step = _s + 1
-            best_loss[0], best_step[0] = _bl, _bs
-            print(f"train: resumed {args.out} at step {start_step} "
-                  f"(best_loss={_bl} best_step={_bs})")
-        except Exception as e:
-            print(f"train: resume failed ({str(e)[:100]}), from scratch")
+    if args.resume:
+        if args.out and os.path.isfile(args.out):
+            try:
+                _s, _bl, _bs = _load_ckpt(args.out)
+                start_step = _s + 1
+                best_loss[0], best_step[0] = _bl, _bs
+                print(f"train: resumed {args.out} at step {start_step} "
+                      f"(best_loss={_bl} best_step={_bs})", flush=True)
+            except Exception as e:
+                print(f"train: resume failed ({str(e)[:100]}), from scratch", flush=True)
+        else:
+            print(f"train: --resume found no ckpt at {args.out}, starting from scratch",
+                  flush=True)
     scaler = torch.amp.GradScaler("cuda", enabled=(args.amp and use_cuda))
     loader, loader_it = None, None
     if stream:
@@ -468,9 +480,9 @@ def main():
             rate = (step + 1) * args.bs / max(dt, 1e-6)
             eta = (args.steps - step - 1) * (dt / max(step, 1)) / 3600 if step else -1
             print(f"step={step} loss_bpsp={loss.item():.4f} "
-                  f"{rate:.0f} patches/s eta={eta:.1f}h elapsed={dt:.0f}s")
+                  f"{rate:.0f} patches/s eta={eta:.1f}h elapsed={dt:.0f}s", flush=True)
             if val_data is not None:
-                print(f"step={step} val_bpsp={_val_bpsp():.4f} (held-out, {len(val_data)} patches)")
+                print(f"step={step} val_bpsp={_val_bpsp():.4f} (held-out, {len(val_data)} patches)", flush=True)
             outdir = os.path.dirname(args.out)
             if outdir:
                 os.makedirs(outdir, exist_ok=True)
@@ -479,11 +491,11 @@ def main():
             if numbered:
                 _save_ckpt(numbered, step, best_loss[0], best_step[0])
                 _prune_keeps()
-                print(f"train: kept {numbered}")
+                print(f"train: kept {numbered}", flush=True)
             if args.keep_best and (best_loss[0] is None or loss.item() < best_loss[0]):
                 best_loss[0], best_step[0] = loss.item(), step
                 _save_ckpt(_best_path(), step, best_loss[0], best_step[0])
-                print(f"train: new best {best_loss[0]:.4f} at step {step} -> {os.path.basename(_best_path())}")
+                print(f"train: new best {best_loss[0]:.4f} at step {step} -> {os.path.basename(_best_path())}", flush=True)
             if args.drive_dir and args.drive_every and step % args.drive_every == 0:
                 _sync_drive(step, loss.item())
     # Final save (also covers steps < log_every).
